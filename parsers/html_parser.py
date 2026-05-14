@@ -172,10 +172,10 @@ class HTMLParserAdapter(BaseParser, HTMLParser):
             raw_text += f' {k}="{v}"' if v else f" {k}"
         raw_text += ">"
 
-        # V01: semantic_role = definition если есть class/id (DOM-элемент определен)
+        # V01: semantic_role = usage для class/id (элемент использует стиль)
         semantic_role = None
         if "class" in attr_dict or "id" in attr_dict:
-            semantic_role = "definition"
+            semantic_role = "usage"
 
         node = self._create_node(
             type="element", name=name, line=line, col=col,

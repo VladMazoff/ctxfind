@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-"""Поисковый движок: граф-обход + скоринг + linker + fallback.
+"""Поисковый движок: QueryOptions + QueryEngine (Extract→Score→Link→Fallback→Assemble).
 
 Контракты:
+  - QueryOptions: dataclass с всеми параметрами поиска.
   - QueryEngine: единая точка поиска.
-  - execute(query, mode, options) -> ContextTree
+  - execute(query: str, options: QueryOptions) -> ContextTree
   - Режимы: 'graph' (AST + скоринг), 'vector' (TF-IDF), 'auto' (приоритет графа).
   - V01: использует semantic_role из AST-узлов для скоринга.
 """
 
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from config import (
@@ -27,8 +29,75 @@ from core.indexer import ProjectIndexer
 from core.linker import LinkerEngine, RelationEdge
 from core.scanner import Scanner
 from core.scorer import ScoredMatch, ScorerEngine, ScoreBreakdown
-from context.chunk import ContextAssembler, ContextTree, TreeNode
+from context.chunk import ContextAssembler, ContextTree
 from parsers.base import NodeDTO
+
+
+@dataclass
+class QueryOptions:
+    """Конфигурация поискового запроса.
+
+    Все флаги CLI транслируются сюда единообразно.
+    """
+    mode: str = "auto"                    # graph | vector | auto
+    depth: int = DEFAULT_MAX_DEPTH        # глубина обхода графа
+    snippet_lines: int = DEFAULT_SNIPPET_LINES  # ±N строк в сниппете
+    lang_filter: Optional[List[str]] = None   # фильтр по языку
+    limit: int = 10                       # макс. результатов
+    min_score: int = SCORING_RULES["threshold_default"]  # мин. порог
+    auto_expand: bool = False             # авто-расширение запроса
+    find_gaps: bool = False               # поиск разрывов логики
+    aggressive: bool = False              # агрессивный режим
+
+    @classmethod
+    def from_args(cls, args) -> "QueryOptions":
+        """Создает QueryOptions из argparse.Namespace.
+
+        Обрабатывает макро-флаги: --smart, --aggressive.
+        """
+        opts = cls()
+
+        # Макро-флаги имеют приоритет
+        if getattr(args, "aggressive", False):
+            opts.min_score = SCORING_RULES["threshold_aggressive"]
+            opts.auto_expand = True
+            opts.find_gaps = True
+            opts.limit = max(getattr(args, "limit", 10), 50)
+            opts.aggressive = True
+        elif getattr(args, "smart", False):
+            opts.min_score = 30
+            opts.auto_expand = True
+            if not getattr(args, "lang", None):
+                opts.lang_filter = ["css", "javascript", "html"]
+
+        # Индивидуальные флаги (переопределяют макро)
+        if hasattr(args, "mode") and args.mode:
+            opts.mode = args.mode
+        if hasattr(args, "depth") and args.depth is not None:
+            opts.depth = args.depth
+        if hasattr(args, "lines") and args.lines is not None:
+            opts.snippet_lines = args.lines
+        if hasattr(args, "lang") and args.lang:
+            opts.lang_filter = list(args.lang)
+        if hasattr(args, "focus_langs") and args.focus_langs:
+            langs = []
+            for fl in args.focus_langs:
+                langs.extend(fl.split(","))
+            if not opts.lang_filter:
+                opts.lang_filter = []
+            opts.lang_filter.extend(langs)
+        if hasattr(args, "limit") and args.limit is not None:
+            if not opts.aggressive:
+                opts.limit = args.limit
+        if hasattr(args, "min_score") and args.min_score is not None:
+            if not opts.aggressive:
+                opts.min_score = args.min_score
+        if hasattr(args, "auto_expand") and args.auto_expand:
+            opts.auto_expand = True
+        if hasattr(args, "find_gaps") and args.find_gaps:
+            opts.find_gaps = True
+
+        return opts
 
 
 class QueryEngine:
@@ -37,6 +106,7 @@ class QueryEngine:
     V01 изменения:
       - Использует semantic_role из AST-узлов при скоринге.
       - Интегрирован LinkerEngine из indexer.
+      - Контракт execute(query, options) -> ContextTree.
     """
 
     def __init__(self, graph: InMemoryGraph):
@@ -64,53 +134,55 @@ class QueryEngine:
     def execute(
         self,
         query: str,
-        mode: str = "auto",
-        depth: int = DEFAULT_MAX_DEPTH,
-        snippet_lines: int = DEFAULT_SNIPPET_LINES,
-        lang_filter: Optional[List[str]] = None,
-        limit: int = 10,
-        min_score: int = SCORING_RULES["threshold_default"],
-        auto_expand: bool = False,
-        find_gaps: bool = False,
-        aggressive: bool = False,
-        **kwargs,
+        options: QueryOptions,
     ) -> ContextTree:
         """Выполняет поисковый запрос.
+
+        Args:
+            query: поисковый запрос.
+            options: QueryOptions с параметрами поиска.
 
         Returns:
             ContextTree с TreeNode'ами.
         """
-        if mode not in ("graph", "vector", "auto"):
-            raise QueryError(f"Неизвестный режим: {mode}")
+        if options.mode not in ("graph", "vector", "auto"):
+            raise QueryError(f"Неизвестный режим: {options.mode}")
 
-        if aggressive:
+        min_score = options.min_score
+        limit = options.limit
+
+        if options.aggressive:
             min_score = SCORING_RULES["threshold_aggressive"]
             limit = max(limit, 50)
 
         all_queries = [query]
         expanded = []
-        if auto_expand:
+        if options.auto_expand:
             expanded = self.scorer.auto_expand(query)
             all_queries.extend(expanded)
 
         all_matches: List[ScoredMatch] = []
 
-        if mode in ("graph", "auto"):
+        if options.mode in ("graph", "auto"):
             for q in all_queries:
-                matches = self._search_graph_scored(q, depth, snippet_lines, lang_filter)
+                matches = self._search_graph_scored(q, options.depth, options.snippet_lines, options.lang_filter)
                 all_matches.extend(matches)
 
-        if mode == "vector" or (mode == "auto" and len(all_matches) < 3):
+        if options.mode == "vector" or (options.mode == "auto" and len(all_matches) < 3):
             if self._fallback_ready:
                 for q in all_queries:
                     fb_matches = self.fallback.search_as_scored(q, top_k=limit, lang=None)
                     all_matches.extend(fb_matches)
 
+        # Дедупликация по location_key (file:line)
+        all_matches = self.scorer.deduplicate_by_location(all_matches)
+
         all_matches = self.scorer.apply_proximity_bonus(all_matches)
 
-        if not aggressive:
+        if not options.aggressive:
             all_matches = self.scorer.filter_by_threshold(all_matches, min_score)
 
+        # Дедупликация по node_id
         seen: Set[str] = set()
         unique_matches: List[ScoredMatch] = []
         for m in all_matches:
@@ -126,14 +198,14 @@ class QueryEngine:
             relations.extend(self.linker.build_relations(q))
 
         gap_edges: List[RelationEdge] = []
-        if find_gaps:
+        if options.find_gaps:
             file_hits: Dict[str, int] = {}
             for m in unique_matches:
                 file_hits[m.file_path] = file_hits.get(m.file_path, 0) + 1
             gap_edges = self.linker.detect_gaps(query, file_hits)
 
         assembler = ContextAssembler(
-            max_lines_per_chunk=snippet_lines * 2,
+            max_lines_per_chunk=options.snippet_lines * 2,
             max_chunks=limit,
         )
         tree = assembler.assemble(
@@ -142,9 +214,9 @@ class QueryEngine:
             gap_edges=gap_edges,
             query=query,
             options={
-                "snippet_lines": snippet_lines,
+                "snippet_lines": options.snippet_lines,
                 "auto_expanded": expanded,
-                "mode": mode,
+                "mode": options.mode,
                 "min_score": min_score,
             },
         )

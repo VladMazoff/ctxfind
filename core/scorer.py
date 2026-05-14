@@ -18,9 +18,9 @@ from config import (
     GAP_BLACKLIST,
     MAX_SCORE,
     SCORING_RULES,
-    SCORING_RULES,
     AUTO_EXPAND_RULES,
 )
+from utils.text import normalize_query
 
 
 @dataclass
@@ -75,6 +75,11 @@ class ScoredMatch:
     semantic_role: Optional[str] = None
     meta: Dict = field(default_factory=dict)
 
+    @property
+    def location_key(self) -> str:
+        """Нормализованный ключ для дедупликации: file:line."""
+        return f"{self.file_path}:{self.line}"
+
     def to_dict(self) -> Dict:
         return {
             "node_id": self.node_id,
@@ -126,8 +131,11 @@ class ScorerEngine:
     )
 
     # HTML class attr паттерн
+    # Используем chr() для избежания проблем с кавычками
+    _Q1 = chr(34)   # double quote
+    _Q2 = chr(39)   # single quote
     HTML_CLASS_PATTERN = re.compile(
-        r'class\s*=\s*["\']([^"\']*)["\']',
+        r"class" + r"\s*=\s*[" + _Q1 + _Q2 + r"]([^" + _Q1 + _Q2 + r"]*)[" + _Q1 + _Q2 + r"]",
         re.IGNORECASE,
     )
 
@@ -307,6 +315,25 @@ class ScorerEngine:
             key=lambda m: (-m.score, m.file_path, m.line),
         )
 
+    def deduplicate_by_location(
+        self,
+        matches: List[ScoredMatch],
+    ) -> List[ScoredMatch]:
+        """Дедупликация по location_key (file:line), оставляя максимальный скор.
+
+        Args:
+            matches: список ScoredMatch.
+
+        Returns:
+            Список без дублей по location_key.
+        """
+        best_by_loc: Dict[str, ScoredMatch] = {}
+        for m in matches:
+            key = m.location_key
+            if key not in best_by_loc or m.score > best_by_loc[key].score:
+                best_by_loc[key] = m
+        return list(best_by_loc.values())
+
     def is_gap_symbol(self, query: str) -> bool:
         """Проверяет, является ли запрос gap-символом (черный список)."""
         return query.lower().strip() in GAP_BLACKLIST
@@ -325,8 +352,7 @@ class ScorerEngine:
 
     def _is_exact_token_match(self, query: str, line: str) -> bool:
         """Проверяет, что query встречается как целый токен в строке."""
-        # Убираем CSS-префиксы для проверки токена
-        clean_query = query.lstrip(".#[]")
+        clean_query = normalize_query(query)
         if not clean_query:
             return False
 
@@ -338,12 +364,9 @@ class ScorerEngine:
 
     def _is_css_selector_match(self, query: str, line: str) -> bool:
         """Проверяет, что query -- CSS-селектор в строке."""
-        # query типа .tiles или #tiles
         if not query.startswith((".", "#")):
             return False
         escaped = re.escape(query)
-        # Матчим как селектор: перед ним начало строки/пробел/запятая,
-        # после -- { , пробел или конец строки
         pattern = re.compile(
             r"(?:^|\s|,|{)" + escaped + r"(?:\s*[,{>+~]|\s+[.#\[]|\s*$)",
             re.IGNORECASE,
@@ -352,7 +375,7 @@ class ScorerEngine:
 
     def _is_html_class_match(self, query: str, line: str) -> bool:
         """Проверяет, что query -- class name внутри class="..."."""
-        clean = query.lstrip(".#[]")
+        clean = normalize_query(query)
         if not clean:
             return False
         match = self.HTML_CLASS_PATTERN.search(line)
@@ -363,12 +386,10 @@ class ScorerEngine:
 
     def _is_js_dom_match(self, query: str, line: str) -> bool:
         """Проверяет, что в строке JS есть DOM-манипуляция, связанная с query."""
-        # Сначала проверяем DOM API
         has_dom_api = bool(self._js_dom_regex.search(line))
         if not has_dom_api:
             return False
-        # Затем проверяем, что query упоминается в строке
-        clean = query.lstrip(".#[]\"\'")
+        clean = normalize_query(query)
         if not clean:
             return False
         return clean.lower() in line.lower()
@@ -378,7 +399,6 @@ class ScorerEngine:
         if not query.startswith((".", "#")):
             return False
         escaped = re.escape(query)
-        # .tiles с последующим селектором
         pattern = re.compile(
             escaped + r"\s+[>+~]?\s*([.#]?[\w-]+)",
             re.IGNORECASE,
@@ -393,7 +413,6 @@ class ScorerEngine:
         """Проверяет наличие семантических ключевых слов."""
         line_lower = line.lower()
         for kw in self.SEMANTIC_KEYWORDS:
-            # Только целые слова
             pattern = re.compile(
                 r"(?:^|[^\w-])" + re.escape(kw) + r"(?:[^\w-]|$)",
                 re.IGNORECASE,

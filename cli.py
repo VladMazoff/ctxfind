@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-"""CLI: argparse, TTY-детекция, пайпы.
+"""CLI: argparse → QueryOptions → запуск ядра → Renderer → stdout.
 
 Контракты:
-  - main(argv) -> парсинг аргументов -> индексация -> поиск -> рендеринг.
+  - main(argv) -> парсинг аргументов → индексация → поиск → рендеринг.
   - Новые флаги V01: --min-score, --focus, --relations-only, --auto-expand,
     --aggressive, --smart, --compact, --full, --find-gaps, --group-hints.
   - Пайпы: JSON по умолчанию.
@@ -15,12 +15,12 @@ import os
 import sys
 from typing import List, Optional
 import io
+
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except AttributeError:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-
 
 from config import (
     DEFAULT_FALLBACK_TOP_K,
@@ -28,19 +28,16 @@ from config import (
     DEFAULT_SNIPPET_LINES,
     SCORING_RULES,
 )
-from context.chunk import ContextAssembler
 from core.indexer import ProjectIndexer
-from core.query import QueryEngine
+from core.query import QueryEngine, QueryOptions
 from core.scanner import Scanner
+from context.renderer import Renderer
+from utils.text import is_tty_stream
 
 
 def is_tty() -> bool:
     """Проверяет, что stdout -- TTY."""
-    return sys.stdout.isatty()
-
-
-
-
+    return is_tty_stream()
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -86,14 +83,14 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "-f", "--format",
-        choices=["json", "tree", "plain"],
+        choices=["json", "tree", "plain", "compact", "relations"],
         default=None,
         help="Формат вывода (по умолчанию: tree в TTY, json в пайпе)",
     )
     parser.add_argument(
         "--output",
         dest="output_format",
-        choices=["json", "tree", "plain"],
+        choices=["json", "tree", "plain", "compact", "relations"],
         default=None,
         help="Алиас для --format",
     )
@@ -222,6 +219,14 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.format is None:
         args.format = "tree" if is_tty() else "json"
 
+    # Макро-флаги для формата
+    if args.compact:
+        args.format = "compact"
+    elif args.full:
+        args.format = "tree"  # full = tree с максимумом деталей
+    elif args.relations_only:
+        args.format = "relations"
+
     if args.group_hints is None:
         args.group_hints = is_tty()
 
@@ -240,9 +245,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     args = resolve_args(args)
 
-    use_color = not args.no_color
-
     try:
+        # 1. Сканирование
         scanner = Scanner(
             lang_filter=args.lang,
             respect_gitignore=not args.no_gitignore,
@@ -254,52 +258,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("Нет файлов для индексации.", file=sys.stderr)
             return 1
 
+        # 2. Индексация (граф)
         indexer = ProjectIndexer(use_threads=False)
-        graph = indexer.scan(
-            args.paths,
-            lang_filter=args.lang,
-            respect_gitignore=not args.no_gitignore,
-            size_limit_mb=args.size_limit,
-        )
- 
+        graph = indexer.build_graph(files)
 
+        # 3. Поиск
+        opts = QueryOptions.from_args(args)
         engine = QueryEngine(graph)
         engine.build_fallback(files)
-
-
-        tree = engine.execute(
-            query=args.query,
-            mode=args.mode,
-            depth=args.depth,
-            snippet_lines=args.lines,
-            lang_filter=args.lang,
-            limit=args.limit,
-            min_score=args.min_score,
-            auto_expand=args.auto_expand,
-            find_gaps=args.find_gaps,
-            aggressive=args.aggressive,
-        )
+        tree = engine.execute(args.query, opts)
 
         if not tree.nodes:
             print(f"По запросу '{args.query}' ничего не найдено.", file=sys.stderr)
             return 1
 
-         
-        if args.relations_only:
-            print(11)
-            output = render_relations_only(tree, args.format, use_color)
-        elif args.compact:
-            print(22)
-            output = render_compact(tree, args.format, use_color)
-        elif args.full:
-            print(33)
-            output = render_full(tree, args.format, use_color, args.group_hints)
-        else:
-             
-            output = render_standard(tree, args.format, use_color, args.group_hints)
-
-            print(99)
-
+        # 4. Рендеринг
+        renderer = Renderer(
+            format=args.format,
+            use_color=not args.no_color,
+        )
+        output = renderer.render(tree)
         print(output)
         return 0
 
@@ -309,66 +287,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 2
-
-
-def render_relations_only(tree, fmt: str, use_color: bool) -> str:
-    """Рендерит только связи."""
-    all_edges = []
-    for node in tree.nodes:
-        all_edges.extend(node.cross_refs)
-    all_edges.extend(tree.gap_edges)
-
-    if fmt == "json":
-        import json
-        return json.dumps(
-            {"relations": [e.to_dict() for e in all_edges]},
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    lines = ["Relations:"]
-    for e in all_edges:
-        lines.append(f"  [{e.type}] {e.from_id} -> {e.to_id or 'empty'}  (conf={e.confidence:.2f})")
-        lines.append(f"    {e.description}")
-    return "\n".join(lines)
-
-
-def render_compact(tree, fmt: str, use_color: bool) -> str:
-    """Краткий вывод: топ-3 матча."""
-    top3 = tree.nodes[:3]
-
-    if fmt == "json":
-        import json
-        return json.dumps(
-            {"top_matches": [n.match.to_dict() for n in top3]},
-            indent=2,
-            ensure_ascii=False,
-        )
-
-    lines = [f"Query: {tree.meta.get('query', '?')}", ""]
-    for i, node in enumerate(top3, 1):
-        m = node.match
-        lines.append(f"{i}. [{m.score}] {m.file_path}:{m.line}  {m.text[:50]}")
-    return "\n".join(lines)
-
-
-def render_full(tree, fmt: str, use_color: bool, group_hints: bool) -> str:
-    """Полный вывод со всеми деталями."""
-    if fmt == "json":
-        import json
-        return json.dumps(tree.to_dict(), indent=2, ensure_ascii=False)
-
-    return tree.to_tree_text(use_color=use_color)
-
-
-def render_standard(tree, fmt: str, use_color: bool, group_hints: bool) -> str:
-    """Стандартный вывод."""
-    if fmt == "json":
-        import json
-         
-        return json.dumps(tree.to_dict(), indent=2, ensure_ascii=False)
-
-    return tree.to_tree_text(use_color=use_color)
 
 
 if __name__ == "__main__":

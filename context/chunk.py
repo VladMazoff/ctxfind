@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-"""Сборка иерархических чанков из результатов поиска."""
+"""Модели контекстного дерева: TreeNode, ContextTree, ContextAssembler.
+
+Контракты:
+  - TreeNode: узел с match, parents, children, cross_refs, snippet.
+  - ContextTree: корневое дерево с meta.
+  - ContextAssembler: сборка TreeNode из ScoredMatch + RelationEdge.
+  - Сериализация: только to_dict(). Логика представления — в Renderer.
+"""
 
 import os
 from typing import Dict, List, Optional, Set
 
 from config import DEFAULT_SNIPPET_LINES, MAX_SCORE
-from core.scorer import ScoredMatch, ScoreBreakdown
+from core.scorer import ScoredMatch
 from core.linker import RelationEdge
 
 
@@ -51,35 +58,6 @@ class TreeNode:
             "meta": self.meta,
         }
 
-    def to_tree_text(self, indent: int = 0, use_color: bool = False, indent_str: str = "    ") -> str:
-        prefix = indent_str * indent
-        score_str = f"[{self.match.score}]" if self.match.score > 0 else ""
-        role_str = f"({self.semantic_role})" if self.semantic_role else ""
-        header = f"{prefix}> {self.match.text[:50]} {score_str} {role_str}".rstrip()
-        lines = [header]
-
-        if self.parents:
-            lines.append(f"{prefix}  ^ parents:")
-            for p in self.parents:
-                lines.append(f"{prefix}    {p.match.text[:40]} [{p.match.score}]")
-
-        if self.cross_refs:
-            lines.append(f"{prefix}  <> cross_refs:")
-            for ref in self.cross_refs:
-                conf = f"{ref.confidence:.1f}"
-                lines.append(f"{prefix}    [{ref.type}] {ref.description[:50]} (conf={conf})")
-
-        if self.children:
-            lines.append(f"{prefix}  v children:")
-            for child in self.children:
-                lines.append(child.to_tree_text(indent + 1, use_color, indent_str))
-
-        snippet_preview = self.snippet.replace(chr(10), " ")[:80]
-        if snippet_preview:
-            lines.append(f'{prefix}  "{snippet_preview}..."')
-
-        return "\n".join(lines)
-
 
 class ContextTree:
     """Корневое дерево контекста поиска."""
@@ -107,15 +85,6 @@ class ContextTree:
             "meta": self.meta,
         }
 
-    def to_tree_text(self, use_color: bool = False) -> str:
-        lines = ["Context Tree:", f"  Query: {self.meta.get('query', 'unknown')}",
-                 f"  Total nodes: {len(self.nodes)}", f"  Gap edges: {len(self.gap_edges)}", ""]
-        for i, child in enumerate(self.root.children, 1):
-            lines.append(f"--- Result {i} ---")
-            lines.append(child.to_tree_text(indent=0, use_color=use_color))
-            lines.append("")
-        return "\n".join(lines)
-
 
 class ContextAssembler:
     """Собирает и форматирует TreeNode из ScoredMatch + RelationEdge."""
@@ -129,6 +98,7 @@ class ContextAssembler:
         opts = options or {}
         snippet_lines = opts.get("snippet_lines", DEFAULT_SNIPPET_LINES)
 
+        # Дедупликация по node_id
         seen = set()
         unique_matches = []
         for m in matches:
@@ -142,6 +112,7 @@ class ContextAssembler:
             node = TreeNode(match=m, snippet=snippet, meta={"query": query, "auto_expanded": opts.get("auto_expanded", False)})
             node_map[m.node_id] = node
 
+        # Связываем cross-refs
         for edge in relations:
             if edge.from_id in node_map:
                 node_map[edge.from_id].add_cross_ref(edge)

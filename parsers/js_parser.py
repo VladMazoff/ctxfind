@@ -151,6 +151,11 @@ class JavaScriptParser(BaseParser):
                 node, i = self._parse_variable(tokens, i, parent_id, result)
                 if node:
                     result.nodes.append(node)
+            elif kind == "IDENT" and i + 1 < len(tokens) and tokens[i + 1][1] == "(":
+                # Вызов функции: foo(...) → usage
+                node, i = self._parse_call(tokens, i, parent_id, result)
+                if node:
+                    result.nodes.append(node)
             else:
                 i += 1
 
@@ -343,6 +348,40 @@ class JavaScriptParser(BaseParser):
             semantic_role="definition",
         )
         result.add_symbol(SymbolDTO(node_id=node_id, name=var_name, type="def"))
+        return node, i
+
+
+    def _parse_call(self, tokens, start, parent_id, result):
+        """Парсит вызов функции как usage-узел."""
+        i = start
+        kind, func_name, line, col = tokens[i]
+
+        # Пропускаем аргументы до закрывающей скобки
+        paren_depth = 0
+        while i < len(tokens):
+            if tokens[i][1] == "(":
+                paren_depth += 1
+            elif tokens[i][1] == ")":
+                paren_depth -= 1
+                if paren_depth == 0:
+                    i += 1
+                    break
+            i += 1
+
+        node_id = self._create_node_id(line, col, f"_call_{func_name}")
+        node = NodeDTO(
+            id=node_id,
+            type="call",
+            name=func_name,
+            line=line,
+            col=col,
+            end_line=tokens[i - 1][2] if i > 0 else line,
+            parent_id=parent_id,
+            raw_text=self._get_raw_text(line, tokens[i - 1][2] if i > 0 else line),
+            file_path=self._file_path,
+            semantic_role="usage",
+        )
+        result.add_symbol(SymbolDTO(node_id=node_id, name=func_name, type="call"))
         return node, i
 
     def _detect_dom_api_calls(self, source: str, result: ParseResult) -> None:

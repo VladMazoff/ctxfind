@@ -3,7 +3,7 @@ from __future__ import annotations
 """Оркестратор сканирования: парсеры -> граф -> символы.
 
 Контракты:
-  - ProjectIndexer.scan(paths, lang_filter) -> InMemoryGraph
+  - ProjectIndexer.build_graph(file_entries) -> InMemoryGraph
   - Мерджит ParseResult в граф, строит кросс-файловые связи.
   - V01: интеграция с LinkerEngine для CSS<->HTML<->JS связей.
   - Все парсеры зарегистрированы: python, javascript, html, css.
@@ -50,12 +50,13 @@ class ProjectIndexer:
     """Оркестратор индексации проекта.
 
     Контракт:
-        scan(paths, lang_filter, respect_gitignore) -> InMemoryGraph
+        build_graph(file_entries) -> InMemoryGraph
 
     V01 изменения:
       - LinkerEngine интегрирован для единого индекса кросс-языковых связей.
       - Все парсеры зарегистрированы.
       - semantic_role из NodeDTO переносится в граф.
+      - Убран внутренний Scanner -- принимает готовый список FileEntry.
     """
 
     def __init__(
@@ -67,46 +68,36 @@ class ProjectIndexer:
         self.use_threads = use_threads
         self.linker = LinkerEngine()
 
-    def scan(
+    def build_graph(
         self,
-        paths: List[str],
-        lang_filter: Optional[List[str]] = None,
-        respect_gitignore: bool = True,
-        skip_patterns: Optional[List[str]] = None,
-        size_limit_mb: int = 5,
-        file_limit: Optional[int] = None,
+        file_entries: List[FileEntry],
     ) -> InMemoryGraph:
-        """Сканирует пути и строит InMemoryGraph.
+        """Строит InMemoryGraph из отсканированных файлов.
 
         Pipeline:
-            1. Scanner собирает FileEntry.
-            2. Парсеры обрабатывают файлы.
-            3. Результаты мерджатся в InMemoryGraph.
-            4. LinkerEngine индексирует файлы для кросс-языковых связей.
-            5. Строятся кросс-файловые связи.
-        """
-        # 1. Сканирование
-        scanner = Scanner(
-            lang_filter=lang_filter,
-            respect_gitignore=respect_gitignore,
-            skip_patterns=skip_patterns,
-            size_limit_mb=size_limit_mb,
-            file_limit=file_limit,
-        )
-        files = scanner.scan(paths)
+            1. Парсеры обрабатывают файлы.
+            2. Результаты мерджатся в InMemoryGraph.
+            3. LinkerEngine индексирует файлы для кросс-языковых связей.
+            4. Строятся кросс-файловые связи.
 
-        if not files:
+        Args:
+            file_entries: список FileEntry от Scanner.
+
+        Returns:
+            InMemoryGraph с узлами, рёбрами и индексами.
+        """
+        if not file_entries:
             return InMemoryGraph()
 
-        # 2. Парсинг
-        parse_results = self._parse_files(files)
+        # 1. Парсинг
+        parse_results = self._parse_files(file_entries)
 
-        # 3. Мерджинг в граф
+        # 2. Мерджинг в граф
         graph = InMemoryGraph()
         self._merge_results(graph, parse_results)
 
-        # 4. V01: LinkerEngine индексирует файлы
-        for entry in files:
+        # 3. V01: LinkerEngine индексирует файлы
+        for entry in file_entries:
             try:
                 with open(entry.path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
@@ -114,7 +105,7 @@ class ProjectIndexer:
             except Exception:
                 pass
 
-        # 5. Кросс-языковые мосты
+        # 4. Кросс-языковые мосты
         self._build_cross_file_bridges(graph)
 
         return graph
