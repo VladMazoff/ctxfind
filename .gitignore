@@ -1,0 +1,12 @@
+*.tmp
+*.log
+*.exe
+*.dll
+*.pyc
+__pycache__/
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
