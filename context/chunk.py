@@ -58,6 +58,61 @@ class TreeNode:
             "meta": self.meta,
         }
 
+    # В классе ContextTree добавьте 
+    def to_dict_safe(self, max_nodes: int = 100) -> Dict:
+        """Безопасное преобразование дерева в словарь без циклических ссылок."""
+        from collections import deque
+        
+        result = {
+            "root": None,
+            "nodes": [],
+            "edges": [],
+        }
+        
+        visited = set()
+        queue = deque([self.root])
+        nodes_processed = 0
+        
+        while queue and nodes_processed < max_nodes:
+            node = queue.popleft()
+            node_id = id(node)
+            
+            if node_id in visited:
+                continue
+                
+            visited.add(node_id)
+            nodes_processed += 1
+            
+            # Добавляем информацию об узле
+            node_data = {
+                "id": node_id,
+                "text": node.match.text[:200] if hasattr(node.match, 'text') else str(node.match)[:200],
+                "score": getattr(node.match, 'score', 0),
+                "semantic_role": node.semantic_role,
+                "snippet_preview": node.snippet[:100] if node.snippet else "",
+            }
+            result["nodes"].append(node_data)
+            
+            # Обрабатываем связи
+            for child in node.children[:10]:  # Ограничиваем количество детей
+                child_id = id(child)
+                result["edges"].append({
+                    "from": node_id,
+                    "to": child_id,
+                    "type": "child"
+                })
+                if child_id not in visited:
+                    queue.append(child)
+            
+            for parent in node.parents[:10]:
+                result["edges"].append({
+                    "from": id(parent),
+                    "to": node_id,
+                    "type": "parent"
+                })
+        
+        return result
+
 
 class ContextTree:
     """Корневое дерево контекста поиска."""

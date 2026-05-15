@@ -235,12 +235,13 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Точка входа CLI.
-
+    print("старт")
     Returns:
         0 -- найдены результаты
         1 -- ничего не найдено или ниже порога
         2 -- ошибка
     """
+    
     parser = create_parser()
     args = parser.parse_args(argv)
     args = resolve_args(args)
@@ -253,7 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             size_limit_mb=args.size_limit,
         )
         files = scanner.scan(args.paths)
-
+        
         if not files:
             print("Нет файлов для индексации.", file=sys.stderr)
             return 1
@@ -261,7 +262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # 2. Индексация (граф)
         indexer = ProjectIndexer(use_threads=False)
         graph = indexer.build_graph(files)
-
+        
         # 3. Поиск
         opts = QueryOptions.from_args(args)
         engine = QueryEngine(graph)
@@ -278,7 +279,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             use_color=not args.no_color,
         )
         output = renderer.render(tree)
-        print(output)
+        print(f"{output}")
         return 0
 
     except KeyboardInterrupt:
@@ -290,4 +291,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

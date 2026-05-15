@@ -96,6 +96,7 @@ class Renderer:
 
     def render(self, tree: ContextTree) -> str:
         """Рендерит ContextTree в выбранный формат."""
+       
         if self.format == "json":
             return self._render_json(tree)
         elif self.format == "tree":
@@ -131,7 +132,7 @@ class Renderer:
 
     # -- JSON --
 
-    def _render_json(self, tree: ContextTree) -> str:
+    def _render_jsonOLD(self, tree: ContextTree) -> str:
         """Рендерит в JSON."""
         data = {
             "version": "0.1",
@@ -139,8 +140,35 @@ class Renderer:
             "query": tree.meta.get("query", ""),
             "tree": tree.to_dict(),
         }
+        quit()
         return json.dumps(data, indent=JSON_INDENT, ensure_ascii=False)
 
+    def _render_json(self, tree: ContextTree) -> str:
+        """Рендерит в JSON (упрощенная версия без циклических ссылок)."""
+        # Собираем только базовую информацию без связей
+        nodes_data = []
+        for node in tree.nodes[:100]:  # Лимит на количество узлов
+            nodes_data.append({
+                "text": node.match.text[:200],
+                "score": node.match.score,
+                "file": node.match.file_path,
+                "line": node.match.line,
+                "col": node.match.col,
+                "type": node.match.match_type,
+                "semantic_role": node.semantic_role,
+                "snippet_preview": node.snippet[:100] if node.snippet else "",
+            })
+        
+        data = {
+            "version": "0.1",
+            "count": len(tree.nodes),
+            "query": tree.meta.get("query", ""),
+            "nodes": nodes_data,
+            "gap_edges_count": len(tree.gap_edges),
+        }
+        return json.dumps(data, indent=JSON_INDENT, ensure_ascii=False)
+ 
+ 
     # -- Tree (ASCII-дерево) --
 
     def _render_tree(self, tree: ContextTree) -> str:
