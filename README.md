@@ -7,7 +7,7 @@
 ## Установка
 
 ```bash
-git clone https://github.com/yourname/ctxfind
+https://github.com/VladMazoff/ctxfind
 cd ctxfind
 pip install -e .
 ```
