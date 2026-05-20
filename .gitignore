@@ -10,3 +10,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+/docs/cli-UI.txt
+/TODO.md
